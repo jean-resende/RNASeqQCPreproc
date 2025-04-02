@@ -1,238 +1,154 @@
-# --- 1. Carregar Bibliotecas Essenciais ---
+# --- 1. Carregar Bibliotecas ---
 library(shiny)
-# Certifique-se de ter instalado via BiocManager: install.packages("BiocManager"); BiocManager::install("ShortRead")
 library(ShortRead)
-# ggplot2 é carregado para potencial uso futuro, mas não nas plotagens de depuração atuais
-library(ggplot2)
 
-# --- 2. Definir a Interface do Usuário (UI) ---
+# --- 2. Interface do Usuário (UI) ---
 ui <- fluidPage(
-    titlePanel("RNASeqQCPreproc - Ferramenta de QC e Pré-processamento (Versão Depuração)"), # Título do App
+  titlePanel("QC Simples com ShortRead"),
+  
+  sidebarLayout(
+    # Painel Lateral para Inputs
+    sidebarPanel(
+      h4("1. Carregar Arquivo"),
+      fileInput("fastqFile",
+                "Selecione o arquivo FASTQ (.fastq ou .fastq.gz)",
+                multiple = FALSE, # Apenas um arquivo
+                accept = c(".fastq", ".fastq.gz", ".fq", ".fq.gz")),
+      
+      hr(), # Linha horizontal
+      
+      h4("2. Executar QC"),
+      # Botão para iniciar a análise
+      actionButton("runQC", "Rodar Análise de Qualidade", icon = icon("play"))
+    ), # Fim sidebarPanel
+    
+    # Painel Principal para Outputs
+    mainPanel(
+      h4("Status"),
+      verbatimTextOutput("statusOutput"), # Para mostrar mensagens de status/erro
+      
+      hr(), # Linha horizontal
+      
+      # Área para o gráfico de qualidade por ciclo
+      h4("Qualidade por Ciclo"),
+      plotOutput("cycleQualityPlot"),
+      
+      hr(), # Linha horizontal
+      
+      # Área para a contagem de reads
+      h4("Contagem de Reads"),
+      verbatimTextOutput("readCountsOutput")
+      
+    ) # Fim mainPanel
+  ) # Fim sidebarLayout
+) # Fim fluidPage (UI)
 
-    sidebarLayout(
-        sidebarPanel(
-            h4("1. Carregar Dados"),
-            # Input: Selecionar arquivos FASTQ
-            fileInput("fastqFiles",
-                      "Selecione UM arquivo FASTQ (.fastq ou .fastq.gz)", # Alterado para UM por simplicidade na depuração
-                      multiple = FALSE, # Alterado para FALSE para simplificar a depuração inicial
-                      accept = c(".fastq", ".fastq.gz", ".fq", ".fq.gz")),
-
-            hr(),
-
-            h4("2. Iniciar Análise"),
-            # Botão para iniciar o processamento
-            actionButton("runAnalysis", "Executar QC (ShortRead)", icon = icon("play")),
-
-            hr(),
-
-            h4("3. Download (a implementar)"),
-            tags$p("Opções de download aparecerão aqui após o processamento.")
-
-        ), # Fim do sidebarPanel
-
-        mainPanel(
-            h3("Resultados"),
-            # Abas para organizar os resultados
-            tabsetPanel(type = "tabs",
-                tabPanel("Resumo Geral",
-                         h4("Arquivo Carregado:"),
-                         verbatimTextOutput("fileSummary"),
-                         hr(),
-                         h4("Status do Processamento:"),
-                         verbatimTextOutput("processStatus")
-                         ),
-                tabPanel("Relatório de QC (ShortRead)",
-                         h4("Estatísticas Gerais de QC"),
-                         verbatimTextOutput("qcStats"), # Output para estatísticas
-                         hr(),
-                         h4("Qualidade por Ciclo"), # Subtítulo do Gráfico 1
-                         plotOutput("qcPlotCycleQuality"), # Output para gráfico de qualidade por ciclo
-                         hr(),
-                         h4("Qualidade Média por Read"), # Subtítulo do Gráfico 2
-                         plotOutput("qcPlotReadQuality")  # Output para gráfico de qualidade por read
-                         ),
-                tabPanel("Resultados Pré-processamento",
-                         h4("Sumário do Pré-processamento"),
-                         verbatimTextOutput("preprocessSummary") # Placeholder
-                         )
-            ) # Fim do tabsetPanel
-        ) # Fim do mainPanel
-    ) # Fim do sidebarLayout
-) # Fim do fluidPage (UI)
-
-# --- 3. Definir a Lógica do Servidor (Server) ---
+# --- 3. Lógica do Servidor (Server) ---
 server <- function(input, output, session) {
-
-    # --- Reatividade para Arquivos Carregados ---
-    output$fileSummary <- renderPrint({
-        req(input$fastqFiles) # Requer que arquivo seja carregado
-        df <- input$fastqFiles[, c("name", "size", "type")]
-        colnames(df) <- c("Nome", "Tamanho (bytes)", "Tipo")
-        print("--- renderPrint fileSummary: Exibindo resumo do arquivo ---")
-        print(df)
+  
+  # --- Valores Reativos ---
+  # Armazena o resultado do ShortRead::qa
+  qa_result_reactive <- reactiveVal(NULL)
+  # Armazena o nome do arquivo processado
+  file_name_reactive <- reactiveVal("Nenhum arquivo carregado")
+  
+  # --- Output: Mensagem de Status ---
+  output$statusOutput <- renderPrint({
+    # Simplesmente imprime o nome do arquivo e se qa_result_reactive tem dados
+    fname <- file_name_reactive()
+    res <- qa_result_reactive()
+    if (is.null(res) && fname == "Nenhum arquivo carregado") {
+      cat("Pronto para carregar arquivo.")
+    } else if (is.null(res) && fname != "Nenhum arquivo carregado") {
+      cat(paste("Processando ou erro em:", fname)) # Mensagem genérica se res for NULL após tentativa
+    } else {
+      cat(paste("Resultados para:", fname))
+    }
+  })
+  
+  # --- Ação: Executar QC quando o botão for clicado ---
+  observeEvent(input$runQC, {
+    # Requer que um arquivo tenha sido carregado
+    req(input$fastqFile)
+    
+    # Limpa resultados anteriores e atualiza status
+    qa_result_reactive(NULL)
+    file_info <- input$fastqFile
+    file_name_reactive(paste("Processando", file_info$name, "..."))
+    showNotification("Iniciando análise QC...", type = "message")
+    
+    # Tenta executar o ShortRead::qa
+    tryCatch({
+      print(paste("Iniciando ShortRead::qa para:", file_info$name)) # Log no console R
+      # Executa a análise de qualidade
+      qa_res <- ShortRead::qa(file_info$datapath, type = "fastq")
+      
+      # Armazena o resultado se for bem-sucedido
+      qa_result_reactive(qa_res)
+      file_name_reactive(file_info$name) # Atualiza nome final
+      print("ShortRead::qa concluído com sucesso.") # Log no console R
+      showNotification("Análise QC concluída!", type = "message")
+      
+    }, error = function(e) {
+      # Em caso de erro durante o qa()
+      error_message <- paste("ERRO durante ShortRead::qa():", e$message)
+      print(error_message) # Log do erro no console R
+      # Atualiza o status para mostrar o erro (simplificado)
+      file_name_reactive(paste("Erro em", file_info$name))
+      # Limpa qualquer resultado parcial
+      qa_result_reactive(NULL)
+      # Mostra notificação de erro na UI
+      showNotification("Erro durante a análise QC.", type = "error")
+      # O output$statusOutput mostrará a mensagem de erro genérica
+    }) # Fim do tryCatch
+    
+  }) # Fim do observeEvent
+  
+  # --- Output: Gráfico de Qualidade por Ciclo ---
+  output$cycleQualityPlot <- renderPlot({
+    # Acessa o resultado reativo
+    res <- qa_result_reactive()
+    qa_res <- ShortRead::qa(file_info$datapath, type = "fastq")
+    
+    
+    # Requer que 'res' não seja NULL (ou seja, qa() rodou com sucesso)
+    req(res)
+    
+    print("Gerando gráfico de Qualidade por Ciclo...") # Log no console R
+    tryCatch({
+      # Usa a função de plotagem exportada e estável
+      plot(ShortRead:::.plotCycleQuality(qa_res))
+      title(main = paste("Qualidade por Ciclo -", file_name_reactive()))
+      print("Gráfico de Qualidade por Ciclo gerado.") # Log no console R
+    }, error = function(e){
+      # Em caso de erro na plotagem
+      print(paste("ERRO ao gerar gráfico de Qualidade por Ciclo:", e$message))
+      plot(1, type="n", main="Erro ao gerar gráfico")
+      text(1, 1, "Erro na plotagem", col = "red")
     })
-
-    # --- Armazenar resultados do QA e nome do arquivo ---
-    qa_results <- reactiveVal(NULL)
-    processed_file_name <- reactiveVal("")
-
-    # --- Reatividade para o Botão de Análise ---
-    observeEvent(input$runAnalysis, {
-        req(input$fastqFiles) # Requer arquivo antes de rodar
-
-        # Limpar resultados anteriores e status
-        qa_results(NULL)
-        processed_file_name("")
-        # Limpa outputs explicitamente para evitar mostrar resultados antigos em caso de erro
-        output$processStatus <- renderPrint({ "Iniciando análise..." })
-        output$qcStats <- renderPrint({ "" })
-        output$qcPlotCycleQuality <- renderPlot({ NULL })
-        output$qcPlotReadQuality <- renderPlot({ NULL })
-        output$preprocessSummary <- renderPrint({ "" })
-
-        # Obter info do arquivo (agora só um)
-        file_info <- input$fastqFiles
-        filePath <- file_info$datapath
-        fileName <- file_info$name
-
-        processed_file_name(fileName) # Guarda o nome do arquivo
-
-        # --- Lógica de QC com ShortRead ---
-        tryCatch({
-            # Notificação na UI e mensagem no console
-            msg_inicio <- paste("Iniciando QC com ShortRead para:", fileName)
-            showNotification(msg_inicio, type = "message", duration = 5)
-            print(paste("--- observeEvent:", msg_inicio, "---")) # Console
-
-            # Executar o QA
-            qa_obj <- ShortRead::qa(filePath, type="fastq")
-
-            print(paste("--- observeEvent: ShortRead::qa concluído para:", fileName, "---")) # Console
-
-            # Armazenar o resultado no reactiveVal
-            qa_results(qa_obj)
-            print("--- observeEvent: Resultado armazenado em qa_results ---") # Console
-
-            # Atualizar Status na UI
-            output$processStatus <- renderPrint({ paste("Análise de QC (ShortRead) concluída para:", fileName) })
-            showNotification("QC concluído!", type = "message", duration = 5)
-
-        }, error = function(e) {
-            # Em caso de erro durante o QA
-            error_message <- paste("!!! ERRO durante ShortRead::qa para", fileName, ":\n", e$message)
-            print(error_message) # Console
-            output$processStatus <- renderPrint({ error_message }) # UI
-            showNotification("Erro no processamento de QC.", type = "error", duration = 10)
-            qa_results(NULL) # Garante que resultados inválidos não sejam usados
-        }) # Fim do tryCatch para QA
-
-        # --- Lógica de Pré-processamento (Placeholder) ---
-        output$preprocessSummary <- renderPrint({ "Lógica de pré-processamento ainda não implementada."})
-
-    }) # Fim do observeEvent runAnalysis
-
-
-    # --- Renderizar Outputs de QC (ShortRead) ---
-
-    # Output para Estatísticas de Texto
-    output$qcStats <- renderPrint({
-        res <- qa_results() # Acessa o resultado armazenado
-        fname <- processed_file_name()
-
-        # Mensagens de depuração para o console
-        print("--- renderPrint qcStats: Verificando 'res' e 'fname' ---")
-        print(paste("Classe de res:", ifelse(is.null(res), "NULL", class(res))))
-        print(paste("Nome do arquivo:", ifelse(fname == "", "VAZIO", fname)))
-
-        req(res, fname) # Requer que 'res' e 'fname' não sejam NULL/vazios
-        print("--- renderPrint qcStats: 'res' e 'fname' OK. Gerando estatísticas... ---") # Console
-
-        # Exibição das estatísticas
-        cat("=== Resumo do Controle de Qualidade (ShortRead) ===\n")
-        cat("Arquivo:", fname, "\n\n")
-        cat("Contagem de Reads:\n")
-        print(res@readCounts)
-        cat("\n---------------------------------\n")
-        cat("Qualidade Base Média por Ciclo (Resumo):\n")
-        cycle_qual <- tryCatch(perCycle(res)$quality, error = function(e) NULL) # Pega qualidade por ciclo
-        if (!is.null(cycle_qual) && "Score" %in% colnames(cycle_qual)) {
-             print(summary(cycle_qual$"Score"))
-        } else {
-             cat("Não foi possível extrair dados de qualidade por ciclo.\n")
-        }
-        cat("\n---------------------------------\n")
-        cat("Frequência de Bases por Ciclo (Início):\n")
-        cycle_nuc <- tryCatch(perCycle(res)$baseCall, error = function(e) NULL) # Pega bases por ciclo
-        if(!is.null(cycle_nuc)){
-            print(head(cycle_nuc))
-        } else {
-            cat("Não foi possível extrair dados de frequência de bases.\n")
-        }
-        cat("\n")
-        print("--- renderPrint qcStats: Fim da exibição das estatísticas ---") # Console
+  }) # Fim do renderPlot cycleQualityPlot
+  
+  # --- Output: Tabela de Contagem de Reads ---
+  output$readCountsOutput <- renderPrint({
+    # Acessa o resultado reativo
+    res <- qa_result_reactive()
+    
+    # Requer que 'res' não seja NULL
+    req(res)
+    
+    print("Gerando tabela de Contagem de Reads...") # Log no console R
+    tryCatch({
+      # Usa a função acessora exportada e estável
+      #ShortRead::readCounts(res)
+      res[["readCounts"]]
+    }, error = function(e){
+      # Em caso de erro ao acessar readCounts
+      print(paste("ERRO ao gerar contagem de reads:", e$message))
+      "Erro ao obter contagem de reads."
     })
-
-    # Output para Gráfico de Qualidade por Ciclo (COM DEPURAÇÃO)
-    output$qcPlotCycleQuality <- renderPlot({
-        res <- qa_results() # Acessa o resultado armazenado
-        fname <- processed_file_name()
-
-        # Mensagens de depuração para o console
-        print("--- renderPlot qcPlotCycleQuality: Verificando 'res' ---")
-        print(paste("Classe de res:", ifelse(is.null(res), "NULL", class(res))))
-
-        req(res) # Requer que 'res' não seja NULL
-
-        print(paste("--- renderPlot qcPlotCycleQuality: 'res' OK. Tentando gerar gráfico para", fname, "---")) # Console
-        tryCatch({
-            # Tenta gerar o gráfico usando a função base plot()
-            plot(ShortRead::plotCycleQuality(res))
-            # Adiciona um título simples (sem ggplot2 por enquanto)
-            title(main = paste("Qualidade Média por Ciclo -", fname))
-            print("--- renderPlot qcPlotCycleQuality: Comando plot() executado ---") # Console
-        }, error = function(e) {
-            # Captura e imprime erro específico da plotagem
-            error_msg_plot <- paste("!!! ERRO em renderPlot qcPlotCycleQuality:", e$message)
-            print(error_msg_plot) # Console
-            # Opcional: Mostrar erro na própria área do gráfico
-            plot(1, type="n", xlab="", ylab="", main="Erro ao gerar gráfico de Qualidade por Ciclo")
-            text(1, 1, error_msg_plot, col = "red", cex = 0.8)
-        })
-    })
-
-    # Output para Gráfico de Qualidade por Read (COM DEPURAÇÃO)
-    output$qcPlotReadQuality <- renderPlot({
-        res <- qa_results() # Acessa o resultado armazenado
-        fname <- processed_file_name()
-
-        # Mensagens de depuração para o console
-        print("--- renderPlot qcPlotReadQuality: Verificando 'res' ---")
-        print(paste("Classe de res:", ifelse(is.null(res), "NULL", class(res))))
-
-        req(res) # Requer que 'res' não seja NULL
-
-        print(paste("--- renderPlot qcPlotReadQuality: 'res' OK. Tentando gerar gráfico para", fname, "---")) # Console
-        tryCatch({
-            # Tenta gerar o gráfico usando a função base plot()
-            plot(ShortRead::plotReadQuality(res))
-             # Adiciona um título simples (sem ggplot2 por enquanto)
-            title(main = paste("Distribuição da Qualidade Média por Read -", fname))
-            print("--- renderPlot qcPlotReadQuality: Comando plot() executado ---") # Console
-        }, error = function(e) {
-             # Captura e imprime erro específico da plotagem
-            error_msg_plot <- paste("!!! ERRO em renderPlot qcPlotReadQuality:", e$message)
-            print(error_msg_plot) # Console
-             # Opcional: Mostrar erro na própria área do gráfico
-            plot(1, type="n", xlab="", ylab="", main="Erro ao gerar gráfico de Qualidade por Read")
-            text(1, 1, error_msg_plot, col = "red", cex = 0.8)
-        })
-    })
-
-    # --- Lógica para Download (a implementar) ---
-    # output$downloadData <- downloadHandler(...)
-
+  }) # Fim do renderPrint readCountsOutput
+  
 } # Fim do Server
 
-# --- 4. Rodar o Aplicativo Shiny ---
+# --- 4. Rodar o Aplicativo ---
 shinyApp(ui = ui, server = server)
